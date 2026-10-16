@@ -45,14 +45,12 @@ th{color:var(--muted);font-weight:600}a{color:var(--accent)}
 .stage-title .sub{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);margin-left:8px}
 .stage-title.root{color:var(--red)}
 .trace-card{border:1px solid var(--line);border-radius:8px;padding:8px 8px 4px;background:var(--bg)}
-.trace-card.root{border-color:var(--red)}
-.trace-card.alarm{box-shadow:inset 3px 0 0 var(--amber)}
-.trace-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-bottom:4px}
+.trace-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-bottom:2px}
 .trace-name{font-size:15px;font-weight:700}
 .trace-name .stage{color:var(--muted);font-weight:500}
 .trace-unit{font-size:12px;color:var(--muted)}
-.trace-badges{margin-left:auto;display:flex;gap:4px}
-.badge.sm{font-size:11px;padding:1px 6px}
+.trace-tags{margin-left:auto;display:flex;gap:10px;font-size:11px;white-space:nowrap}
+.tag-alarm{color:var(--amber)}.tag-root{color:var(--red);font-weight:600}
 .sw{display:inline-block;width:12px;height:12px;vertical-align:-2px;margin-right:4px;border-radius:2px}
 """
 
@@ -234,11 +232,11 @@ const esc = t => String(t).replace(/[&<>"]/g, c => ({{'&':'&amp;','<':'&lt;','>'
 function card(stage, m) {{
   const sid = stage + '.' + m, alarm = D.alarms.find(a => a.sensor === sid), isRoot = stage === D.root_stage;
   const unit = D.units[m] ? `<span class="trace-unit">${{esc(D.units[m])}}</span>` : '';
-  const badges = [];
-  if (alarm) badges.push(`<span class="badge sm b-amber" title="Detector alarm">⚠ ${{esc(alarm.kind)}} @t=${{alarm.alarm_tick}}</span>`);
-  if (isRoot) badges.push(`<span class="badge sm b-red">root cause</span>`);
-  return `<div class="trace-card${{isRoot ? ' root' : ''}}${{alarm ? ' alarm' : ''}}">
-    <div class="trace-head"><span class="trace-name"><span class="stage">${{esc(stage)}} ·</span> ${{esc(m)}}</span>${{unit}}<span class="trace-badges">${{badges.join('')}}</span></div>
+  const tags = [];
+  if (alarm) tags.push(`<span class="tag-alarm" title="Detector alarm">${{esc(alarm.kind)}} · t=${{alarm.alarm_tick}}</span>`);
+  if (isRoot) tags.push(`<span class="tag-root">root cause</span>`);
+  return `<div class="trace-card">
+    <div class="trace-head"><span class="trace-name"><span class="stage">${{esc(stage)}} ·</span> ${{esc(m)}}</span>${{unit}}<span class="trace-tags">${{tags.join('')}}</span></div>
     ${{chart(sid, stage)}}</div>`;
 }}
 D.stages.forEach((stage, i) => {{
