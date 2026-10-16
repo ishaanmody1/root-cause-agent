@@ -39,6 +39,20 @@ background:var(--bg);border-radius:6px;padding:8px;max-height:400px;overflow:aut
 table{border-collapse:collapse;width:100%;font-size:13px}td,th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
 th{color:var(--muted);font-weight:600}a{color:var(--accent)}
 .legend span{display:inline-block;margin-right:12px;font-size:12px;color:var(--muted)}
+.stage-row{margin:14px 0 4px;padding-top:10px;border-top:1px solid var(--line)}
+.stage-row:first-of-type{border-top:0;margin-top:4px;padding-top:0}
+.stage-title{font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+.stage-title .sub{font-weight:400;text-transform:none;letter-spacing:0;color:var(--muted);margin-left:8px}
+.stage-title.root{color:var(--red)}
+.trace-card{border:1px solid var(--line);border-radius:8px;padding:8px 8px 4px;background:var(--bg)}
+.trace-card.root{border-color:var(--red)}
+.trace-card.alarm{box-shadow:inset 3px 0 0 var(--amber)}
+.trace-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;margin-bottom:4px}
+.trace-name{font-size:15px;font-weight:700}
+.trace-name .stage{color:var(--muted);font-weight:500}
+.trace-unit{font-size:12px;color:var(--muted)}
+.trace-badges{margin-left:auto;display:flex;gap:4px}
+.badge.sm{font-size:11px;padding:1px 6px}
 .sw{display:inline-block;width:12px;height:12px;vertical-align:-2px;margin-right:4px;border-radius:2px}
 """
 
@@ -77,6 +91,7 @@ def render_dashboard(sc: Any, det: Detection, run: DiagnosisRun, path: Path) -> 
         "series": series,
         "stages": topo.stages,
         "sensors": topo.sensors,
+        "units": topo.units,
         "baselines": {k: {"mean": v.mean, "std": v.std} for k, v in det.baselines.items()},
         "alarms": [a.model_dump() for a in det.alarms],
         "alarm_tick": alarm_tick,
@@ -176,7 +191,7 @@ def render_dashboard(sc: Any, det: Detection, run: DiagnosisRun, path: Path) -> 
 <script>
 const D = {json.dumps(payload)};
 const root = document.getElementById('plots');
-const W = 320, H = 170, L = 44, R = 8, T = 22, B = 20;
+const W = 320, H = 150, L = 44, R = 8, T = 8, B = 20;
 const fmt = v => Math.abs(v) >= 1000 ? v.toFixed(0) : Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(2);
 function chart(sid, stage) {{
   const ys = D.series[sid], xs = D.t, n = xs.length;
@@ -212,18 +227,31 @@ function chart(sid, stage) {{
     g += `<text x="${{L - 4}}" y="${{sy(yv) + 3}}" font-size="9" text-anchor="end" fill="var(--muted)">${{lbl}}</text>`;
   for (const xv of [0, Math.round(n / 2), n - 1])
     g += `<text x="${{sx(xv)}}" y="${{H - 6}}" font-size="9" text-anchor="middle" fill="var(--muted)">t=${{xv}}</text>`;
-  const title = sid + (alarm ? '  ⚠ ' + alarm.kind + ' @' + alarm.alarm_tick : '') + (isRoot ? '  ◀ root cause' : '');
-  g += `<text x="${{L}}" y="14" font-size="11" font-weight="600" fill="${{isRoot ? 'var(--red)' : 'currentColor'}}">${{title}}</text></svg>`;
+  g += `</svg>`;
   return g;
 }}
-for (const stage of D.stages) {{
-  const row = document.createElement('div');
-  row.style.display = 'grid'; row.style.gridTemplateColumns = innerWidth < 700 ? '1fr' : (D.sensors[stage].length <= 3 ? 'repeat(3,minmax(0,1fr))' : 'repeat(auto-fill,minmax(220px,1fr))'); row.style.gap = '8px'; row.style.marginBottom = '8px';
-  for (const m of D.sensors[stage]) {{
-    const div = document.createElement('div'); div.innerHTML = chart(stage + '.' + m, stage); row.appendChild(div);
-  }}
-  root.appendChild(row);
+const esc = t => String(t).replace(/[&<>"]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[c]));
+function card(stage, m) {{
+  const sid = stage + '.' + m, alarm = D.alarms.find(a => a.sensor === sid), isRoot = stage === D.root_stage;
+  const unit = D.units[m] ? `<span class="trace-unit">${{esc(D.units[m])}}</span>` : '';
+  const badges = [];
+  if (alarm) badges.push(`<span class="badge sm b-amber" title="Detector alarm">⚠ ${{esc(alarm.kind)}} @t=${{alarm.alarm_tick}}</span>`);
+  if (isRoot) badges.push(`<span class="badge sm b-red">root cause</span>`);
+  return `<div class="trace-card${{isRoot ? ' root' : ''}}${{alarm ? ' alarm' : ''}}">
+    <div class="trace-head"><span class="trace-name"><span class="stage">${{esc(stage)}} ·</span> ${{esc(m)}}</span>${{unit}}<span class="trace-badges">${{badges.join('')}}</span></div>
+    ${{chart(sid, stage)}}</div>`;
 }}
+D.stages.forEach((stage, i) => {{
+  const isRoot = stage === D.root_stage;
+  const nAlarms = D.alarms.filter(a => a.stage === stage).length;
+  const wrap = document.createElement('div'); wrap.className = 'stage-row';
+  const sub = `stage ${{i + 1}} of ${{D.stages.length}}` + (nAlarms ? ` · ${{nAlarms}} alarm${{nAlarms > 1 ? 's' : ''}}` : '') + (isRoot ? ' · diagnosed root cause' : '');
+  wrap.innerHTML = `<div class="stage-title${{isRoot ? ' root' : ''}}">${{esc(stage)}}<span class="sub">${{sub}}</span></div>`;
+  const row = document.createElement('div');
+  row.style.display = 'grid'; row.style.gridTemplateColumns = innerWidth < 700 ? '1fr' : (D.sensors[stage].length <= 3 ? 'repeat(3,minmax(0,1fr))' : 'repeat(auto-fill,minmax(230px,1fr))'); row.style.gap = '8px';
+  for (const m of D.sensors[stage]) {{ const div = document.createElement('div'); div.innerHTML = card(stage, m); row.appendChild(div); }}
+  wrap.appendChild(row); root.appendChild(wrap);
+}});
 </script></body></html>"""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(doc)
