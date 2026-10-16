@@ -69,10 +69,10 @@ td.num,th.num{text-align:right}
 .sw{display:inline-block;width:14px;height:10px;vertical-align:-1px;margin-right:5px;border:1px solid var(--line)}
 .charts{display:grid;gap:8px;padding:8px 10px}
 .chart{background:var(--panel2);border:1px solid var(--line2)}
-.chart-head{display:flex;align-items:baseline;gap:8px;padding:4px 8px 0}
+.chart-head{display:flex;align-items:baseline;gap:8px;padding:4px 8px 0;flex-wrap:wrap}
 .chart-name{font-size:13px;font-weight:700}
 .chart-unit{font-size:11px;color:var(--muted)}
-.chart-val{margin-left:auto;font-size:13px;font-weight:600}
+.chart-val{margin-left:auto;font-size:13px;font-weight:600;white-space:nowrap}
 .chart-base{font-size:11px;color:var(--muted)}
 .chart-state{font-size:11px;font-weight:700;letter-spacing:.05em;min-width:26px;text-align:right}
 p{margin:6px 0}
@@ -334,7 +334,7 @@ function card(stage, m, isRoot) {{
   const unit = D.units[m] ? `<span class="chart-unit">${{esc(D.units[m])}}</span>` : '';
   const state = alarm ? `<span class="chart-state abn">${{D.state_label[alarm.kind] || alarm.kind}}</span>` : '<span class="chart-state"></span>';
   return `<div class="chart"><div class="chart-head"><span class="chart-name">${{esc(D.pretty[m] || m)}}</span>${{unit}}
-    <span class="chart-val mono">${{cur === null ? 'BAD' : fmt(cur)}}</span><span class="chart-base mono">/ ${{isNaN(b.mean) ? '-' : fmt(b.mean)}}</span>${{state}}</div>${{chart(sid, isRoot)}}</div>`;
+    <span class="chart-val mono">${{cur === null ? 'BAD' : fmt(cur)}} <span class="chart-base">/ ${{isNaN(b.mean) ? '-' : fmt(b.mean)}}</span></span>${{state}}</div>${{chart(sid, isRoot)}}</div>`;
 }}
 D.stages.forEach((stage, i) => {{
   const isRoot = stage === D.root_stage;
