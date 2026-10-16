@@ -8,3 +8,4 @@ data/real/*.zip
 .pytest_cache/
 .ruff_cache/
 dist/
+.gstack/
