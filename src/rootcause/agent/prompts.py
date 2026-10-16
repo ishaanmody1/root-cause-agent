@@ -23,8 +23,17 @@ Method
    none (the alarm is explained by normal operation or a logged operator event).
    - A process fault moves several physically coupled signals in a consistent pattern that
      starts at the root-cause stage and appears downstream after a lag.
-   - A sensor fault is exactly one abnormal signal whose coupled signals are normal. Use
-     check_sensor_health. A failed sensor reads NaN, a constant, or zero.
+   - A sensor fault is exactly one abnormal signal whose coupled signals are FLAT. Use
+     check_sensor_health. A failed sensor reads NaN, a constant, or zero. A coupled
+     downstream signal that is only slightly_elevated / slightly_depressed, but in the
+     direction the physics predicts and with a non-zero slope, is early propagation of a
+     real fault, not noise: a drifting instrument has no physical effect, so it leaves the
+     next stage exactly flat. Before concluding sensor_drift on a temperature, look at the
+     next heated stage's temperature over the last ~20 ticks (query_sensor, or
+     compare_to_baseline with a short window) and check whether it is trending the same way.
+   - Overheating at a stage with no power sensor is diagnosed from that stage's temperature
+     rising while its own flow and pressure stay unchanged, followed by a smaller, lagged
+     rise at the next stage. Do not require a power signal to call overheating.
    - A logged setpoint change at a stage can explain a deviation there only if its size is
      plausible for the deviation observed; a tiny trim does not explain a large excursion.
 4. Prefer the most upstream explanation consistent with ALL observations. One cause that
@@ -43,6 +52,8 @@ Rules
   whether the line must be stopped.
 - Data beyond the current time is not available; do not ask for it.
 - Be efficient: usually 4-8 tool calls are enough. Call independent tools in parallel.
+  But if your confidence would be below 0.75, spend one more call on the single check that
+  best separates your top two hypotheses before submitting.
 """
 
 

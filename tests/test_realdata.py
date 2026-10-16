@@ -89,3 +89,81 @@ def test_injected_fault_is_detected_and_tools_work(fake_csv: Path):
 def test_missing_csv_message(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="Kaggle"):
         load_real(tmp_path / "nope.csv")
+
+
+def test_dashboard_renders_for_real_scenario(fake_csv: Path, tmp_path: Path):
+    """Regression: the renderer used to read the simulator-only ``spec.events`` field."""
+    from rootcause.agent.loop import DiagnosisRun, RunUsage
+    from rootcause.agent.schema import Diagnosis
+    from rootcause.ui.dashboard import render_dashboard
+
+    df, topo = load_real(fake_csv, tick_seconds=10)
+    sc = inject_sensor_fault(
+        df,
+        topo,
+        np.random.default_rng(2),
+        baseline_ticks=180,
+        kind="sensor_failure",
+        stage="Machine2",
+        sensor="MaterialPressure",
+        onset=300,
+    )
+    det = detect(sc.data, DetectorConfig(baseline_ticks=180))
+    run = DiagnosisRun(
+        scenario_id=sc.scenario_id,
+        model="test",
+        status="ok",
+        t_now=330,
+        usage=RunUsage(),
+        diagnosis=Diagnosis(
+            status="fault_diagnosed",
+            root_cause_stage="Machine2",
+            fault_type="sensor_failure",
+            affected_sensor="Machine2.MaterialPressure",
+            confidence=0.9,
+            evidence=[],
+            alternative_hypotheses=[],
+            recommended_action="Replace the transmitter.",
+            requires_downtime=False,
+            reasoning_summary="Single flatlined channel.",
+        ),
+    )
+    out = render_dashboard(sc, det, run, tmp_path / "real.html")
+    text = out.read_text()
+    assert "No events logged" in text and "Machine2.MaterialPressure" in text
+
+
+def test_injected_scenario_is_scored_on_its_own_alarm(fake_csv: Path):
+    """The injected sensor's alarm after onset is used, not an earlier alarm elsewhere."""
+    from rootcause.realdata.evaluate import injected_alarm
+
+    df, topo = load_real(fake_csv, tick_seconds=10)
+    sc = inject_sensor_fault(
+        df,
+        topo,
+        np.random.default_rng(3),
+        baseline_ticks=180,
+        kind="sensor_failure",
+        stage="Machine4",
+        sensor="Pressure",
+        onset=400,
+    )
+    # A natural-looking alarm on another sensor, well before the injection.
+    sc.data.loc[250:300, "Machine2.MaterialPressure"] += 30.0
+    det = detect(sc.data, DetectorConfig(baseline_ticks=180))
+    assert det.first_alarm is not None and det.first_alarm.sensor == "Machine2.MaterialPressure"
+    chosen = injected_alarm(det, sc)
+    assert chosen is not None
+    assert chosen.sensor == "Machine4.Pressure" and chosen.alarm_tick >= 400
+
+
+def test_submit_diagnosis_stage_enum_follows_topology(fake_csv: Path):
+    """The diagnosis stage fields are restricted to the current line's stages."""
+    _, topo = load_real(fake_csv, tick_seconds=10)
+    spec = [t for t in build_tool_specs(topo) if t["name"] == "submit_diagnosis"][0]
+    props = spec["input_schema"]["properties"]
+    stage_enum = props["root_cause_stage"]["anyOf"][0]["enum"]
+    assert "Machine2" in stage_enum and "feed" not in stage_enum
+    hyp_enum = props["alternative_hypotheses"]["items"]["properties"]["root_cause_stage"]
+    assert hyp_enum["anyOf"][0]["enum"] == stage_enum
+    assert "feed" not in props["root_cause_stage"]["description"]

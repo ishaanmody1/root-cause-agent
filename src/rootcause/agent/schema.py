@@ -13,13 +13,17 @@ DiagFaultType = Literal[
 
 
 class Evidence(BaseModel):
-    signal: str = Field(description="Sensor id like 'feed.pressure', or 'events'.")
+    signal: str = Field(
+        description="Sensor id as the tools report it ('<stage>.<sensor>'), or 'events'."
+    )
     observation: str = Field(description="What the data shows, with ticks and magnitudes.")
     why_it_matters: str = Field(description="How this observation supports the diagnosis.")
 
 
 class Hypothesis(BaseModel):
-    root_cause_stage: str | None
+    root_cause_stage: str | None = Field(
+        description="One of this line's stage names (from get_line_topology), or null."
+    )
     fault_type: DiagFaultType
     confidence: float = Field(description="0-1 probability this hypothesis is correct.")
     why_less_likely: str
@@ -32,7 +36,8 @@ class Diagnosis(BaseModel):
         "insufficient_evidence when the data cannot support a conclusion."
     )
     root_cause_stage: str | None = Field(
-        description="feed | heater | press | finish, or null. For a supply drop use 'feed'."
+        description="One of this line's stage names (from get_line_topology), or null. For a "
+        "supply drop use the first stage."
     )
     fault_type: DiagFaultType
     affected_sensor: str | None = Field(

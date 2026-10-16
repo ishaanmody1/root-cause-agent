@@ -11,9 +11,10 @@ starving press stage three hops downstream, and a threshold alert blames the pre
 
 ![Dashboard: sensor traces with the alarm window shaded, the root-cause stage highlighted, and the structured diagnosis beside it](docs/dashboard.jpg)
 
-*A heater clog. The alarm fired on `press.flow` (two stages downstream). The agent traced it
-back: the press inlet flow fell while the heater inlet flow stayed normal, so the restriction is
-inside the heater, confirmed by the heater running hot with unchanged heat input.*
+*A heater clog, diagnosed by the LLM agent. The alarm fired on `press.flow`, one stage
+downstream. The agent traced it back: the press inlet flow fell while the heater inlet flow
+stayed normal, so the restriction is inside the heater, confirmed by the heater running hot
+with unchanged heat input and the press pressure falling rather than rising.*
 
 ## What is in the box
 
@@ -139,36 +140,55 @@ Three systems are scored on the same scenarios:
 - **LLM agent**: Claude with the tools, no knowledge of the simulator beyond the topology
   tool.
 
-Offline results, 48 scenarios (40 alarms), seed 0, from
+Results on 48 scenarios (40 alarms), seed 0. The LLM agent is `claude-sonnet-5-5` at medium
+effort; its full report with calibration bins and the per-scenario table is
+[docs/eval-llm-report.md](docs/eval-llm-report.md), the offline baselines are in
 [docs/eval-offline-report.md](docs/eval-offline-report.md):
 
 | Metric | Naive | Rule-based tracer | LLM agent |
 |---|---|---|---|
-| Root-cause stage accuracy | 69.4% | 94.4% | run `make eval-llm` |
-| Fault-type accuracy | 94.4% | 91.7% | |
-| Both correct | 63.9% | 91.7% | |
-| Both correct, **misleading cases only** (n=11) | **0.0%** | 100.0% | |
-| Abstained | 0.0% | 0.0% | |
-| Confident errors | 0.0% | 5.0% | |
-| False positives on no-fault alarms | 100.0% | 0.0% | |
-| Brier score | 0.26 | 0.089 | |
+| Root-cause stage accuracy | 69.4% | 94.4% | 100.0% |
+| Fault-type accuracy | 94.4% | 91.7% | 100.0% |
+| Both correct | 63.9% | 91.7% | 100.0% |
+| Both correct, **misleading cases only** (n=11) | **0.0%** | 100.0% | 100.0% |
+| Abstained | 0.0% | 0.0% | 0.0% |
+| Confident errors (wrong at confidence ≥ 0.75) | 0.0% | 5.0% | 0.0% |
+| False positives on no-fault alarms | 100.0% | 0.0% | 0.0% |
+| Brier score | 0.26 | 0.089 | 0.032 |
+| Mean tool calls per diagnosis | 0 | 5.2 | 4.9 |
+| Mean cost per diagnosis | – | – | $0.026 |
+| p50 latency | – | – | 11.2 s |
 
 Detector on the same suite: 0% false alarms on 6 normal runs, 100% detection on 36 faults,
 median 17 ticks from fault onset to alarm, and 30.6% of alarms fire at a stage other than the
 root cause.
 
-Two things to read from this table. The naive approach is right about *what kind* of fault it
-is most of the time and wrong about *where* in every misleading case, which is the failure
-the project targets. And the rule-based tracer shows that on a simulator whose physics you
-wrote, a few rules go a long way; its weak spots are the ambiguous cases (overheating with a
-distracting setpoint change logged at the same stage: 50% correct) where judgment about
-magnitude is needed. The LLM column is where the agent has to earn its keep: match the
-tracer on the simulator, and generalize to the real line where there are no rules to write.
+Three things to read from this table. The naive approach is right about *what kind* of fault
+it is most of the time and wrong about *where* in every misleading case, which is the failure
+the project targets. The rule-based tracer shows that on a simulator whose physics you wrote,
+a few rules go a long way; its weak spots are the ambiguous cases (overheating at a stage
+with no power sensor, or with a distracting setpoint change logged at the same stage: 50%
+correct) where judgment about magnitude is needed. And the LLM agent, which knows nothing
+about the simulator beyond the topology tool, matches the tracer on the misleading clogs and
+beats it on exactly those ambiguous cases, with no confident errors and a Brier score a third
+of the tracer's, at about 2.5 cents and 11 seconds per diagnosis.
 
-The LLM column is empty in this README because the machine this was built on had no API
-credentials at the time. `make eval-llm` runs it (about 40 diagnoses at roughly $0.05 to
-$0.10 each with the default `claude-sonnet-5-5` at medium effort) and writes the full report
-with calibration bins, per-kind breakdown, tokens, cost and latency.
+How the LLM column was produced, so the numbers are not oversold. The first run with the
+untuned prompt scored 97.2% both-correct on seed 0: the single miss was an overheating fault
+at the feed stage (which has no power sensor), called a sensor drift at confidence 0.65
+because the downstream heater temperature was only "slightly elevated" and the prompt said a
+sensor fault's coupled signals are "normal". The prompt was tuned on that one failure (a
+sub-threshold coupled signal trending in the physically predicted direction is early
+propagation, not noise; overheating at a stage without a power sensor is diagnosed from
+temperature alone; spend one more tool call when confidence would be below 0.75). The change
+was validated on seed 1, a different suite the prompt had never seen: 100% both-correct and
+zero confident errors both before and after the change, so no regression, at one extra tool
+call per diagnosis on average. Re-run on seed 0, the tuned prompt fixes the miss, now calling
+overheating at 0.60 after checking the heater temperature's slope. One scenario separates
+97.2% from 100%, and LLM sampling is not deterministic, so read the LLM column as "at or
+near ceiling on this suite" rather than as a precise number. Across both seeds the agent is
+mildly under-confident (ECE 0.17: 100% accuracy in the 0.8-1.0 bin at a mean confidence of
+0.86), which is the safe side to err on for a diagnosis a human will act on.
 
 ## Real-data validation
 
@@ -192,6 +212,25 @@ The dataset has no fault labels, so validation has two parts:
 2. **Natural alarms** (`rootcause real-diagnose --alarm N`): no labels, judged
    qualitatively on whether the evidence chain is consistent with the topology and whether the
    agent abstains when it should.
+
+Results with `claude-sonnet-5-5` at medium effort (`rootcause real-eval --n 20`, seed 0,
+2026-10-15). The detector caught 14 of the 20 injections (70%); the misses are drifts on
+channels that had already alarmed naturally before the injection, or that stayed inside the
+real noise. On the 14 alarms the agent was fully correct on 5 (36%), abstained on 6 (43%) and
+wrong on 3 (21%), never above confidence 0.5, so zero confident errors; mean cost $0.052, twice
+the simulator's, from the larger topology and the longer alarm report. The naive baseline
+scores 100% here by construction: the harness scores each injection on the injected sensor's
+own alarm and every injection is a sensor fault, so "blame the alarming sensor" is a ceiling
+for this suite, not a competitor. The three errors were all "clog at the alarming machine" at
+0.4 to 0.5: on a line with 85 sensors and 49 natural alarms in four hours, "one abnormal signal
+with flat neighbours" is rarely cleanly true, and the agent reaches for a process fault. The
+abstentions are the more interesting outcome: missing-data and stuck-zero injections on
+raw-material lab-value channels, which the topology notes say change in steps at lot changes,
+and which the agent declined to call either way. On the first natural alarm (`real-diagnose
+--alarm 0`, a Stage1 output measurement at t=183) the agent abstained at 0.30 with a coherent
+chain: four output measurements moved together and propagated to Stage2 after a lag, so a real
+product change, but no cause visible in any upstream machine signal, and it suggested checking
+for a material lot change. For an unlabelled run that is the right answer.
 
 Building the adapter changed the detector: real controlled and lab-value channels sit exactly
 constant for long stretches, which the first flatline rule read as 66 dead sensors. Flatline
@@ -229,10 +268,23 @@ The CSV is not redistributed (license unstated on Kaggle). Download it from the 
 
 ## Limitations and next steps
 
-- The LLM eval column needs to be populated and the prompt tuned against it; the calibration
-  guidance in the prompt is untested until then.
-- Single-fault scenarios only. Compound faults and a fault during a setpoint transient are
-  the obvious next scenario kinds.
+- The simulator suite is close to saturated for the LLM agent (100% on both seeds tried), so
+  it no longer separates prompts. The next suite needs harder cases: compound faults, a
+  fault during a setpoint transient, smaller severities and shorter grace windows, and
+  scenarios where the honest answer is `insufficient_evidence` (the agent never abstained
+  on the simulator, and the eval cannot yet tell whether that is right).
+- Each eval number is one run of a sampled model. The seed-0 and seed-1 runs agree, but a
+  confidence interval would need repeats, and the one-scenario difference between the
+  untuned and tuned prompts is within sampling noise.
+- The first real-data runs had the agent naming the right sensor and fault type and then
+  writing `feed` or `finish` as the stage, because the diagnosis schema's field description
+  listed the simulator's four stage names. The stage fields are now enums built from the
+  line's topology, like the other tools' arguments. The lesson generalises: anything in a
+  prompt or schema that quietly assumes one line's vocabulary will surface on the next line.
+- The real-data injected-fault eval initially scored every injection against the run's
+  first natural alarm (which fires before any injection), so the agent abstained on all 20
+  and the numbers were meaningless. It now scores each injection on the injected sensor's
+  own alarm episode, and counts injections the detector never catches as misses.
 - The simulator's physics are abstract by design. Real lines have control loops that mask
   symptoms; the real-data adapter is where that shows up, and only sensor faults can be
   labelled there.
@@ -249,6 +301,6 @@ src/rootcause/
   realdata/   adapter.py, inject.py, evaluate.py
   ui/         dashboard.py
   cli.py
-tests/        29 tests, all offline
-docs/         screenshot, offline eval report
+tests/        30 tests, all offline
+docs/         screenshot, offline eval report, LLM eval report
 ```

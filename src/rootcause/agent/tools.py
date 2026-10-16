@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from rootcause.agent.schema import Diagnosis, strict_schema
+from rootcause.agent.schema import Diagnosis, Hypothesis, strict_schema
 from rootcause.detect.detector import Detection, DetectorConfig, ewma, robust_baseline
 from rootcause.sim.faults import Event
 from rootcause.sim.simulator import Scenario
@@ -466,8 +466,10 @@ def build_tool_specs(topology: Topology) -> list[dict[str, Any]]:
         {
             "name": "compare_to_baseline",
             "description": "Recent window of one sensor vs its baseline: shift in sigma units, "
-            "percent change, trend slope, NaN fraction, and a verdict (normal / "
-            "slightly_elevated / elevated / depressed / missing / flatline / stuck_zero).",
+            "percent change, trend slope (slope_per_10_ticks, in sensor units), NaN fraction, "
+            "and a verdict (normal / slightly_elevated / elevated / depressed / missing / "
+            "flatline / stuck_zero). Use a short window_ticks (10-15) to see whether a signal "
+            "has started moving recently even if its window mean is still near baseline.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -515,7 +517,12 @@ def build_tool_specs(topology: Topology) -> list[dict[str, Any]]:
             "name": "check_sensor_health",
             "description": "Data-quality flags for one sensor (missing, flatline, stuck zero, far "
             "outside baseline) and the verdicts of its physically coupled signals (same stage "
-            "and neighbouring stages), to separate sensor faults from process faults.",
+            "and neighbouring stages), to separate sensor faults from process faults. Coupled "
+            "verdicts use a 30-tick window mean, which dilutes a deviation that is still "
+            "developing: a coupled signal that is slightly_elevated / slightly_depressed in "
+            "the physically expected direction is evidence of a real fault, so confirm it with "
+            "query_sensor or compare_to_baseline with a shorter window before calling a "
+            "sensor fault.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -530,12 +537,32 @@ def build_tool_specs(topology: Topology) -> list[dict[str, Any]]:
             "name": "submit_diagnosis",
             "description": "Submit the final structured diagnosis. Call exactly once, when the "
             "evidence is gathered. This ends the investigation.",
-            "input_schema": strict_schema(Diagnosis),
+            "input_schema": _diagnosis_schema(stages),
         },
     ]
     for spec in specs:
         spec["strict"] = True
     return specs
+
+
+def _diagnosis_schema(stages: list[str]) -> dict[str, Any]:
+    """``submit_diagnosis`` schema with the stage fields restricted to THIS line's stages.
+
+    The schema is otherwise line-agnostic; without the enum the model tends to borrow stage
+    names it has seen in descriptions rather than the ones the topology tool returned.
+    """
+    schema = strict_schema(Diagnosis)
+    stage_field = {
+        "anyOf": [{"type": "string", "enum": list(stages)}, {"type": "null"}],
+        "description": Diagnosis.model_fields["root_cause_stage"].description,
+    }
+    schema["properties"]["root_cause_stage"] = stage_field
+    hyp = schema["properties"]["alternative_hypotheses"]["items"]
+    hyp["properties"]["root_cause_stage"] = {
+        **stage_field,
+        "description": Hypothesis.model_fields["root_cause_stage"].description,
+    }
+    return schema
 
 
 # Default specs for the simulated line (kept for convenience and tests).

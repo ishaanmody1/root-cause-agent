@@ -59,6 +59,21 @@ class RealResult(BaseModel):
     agent_summary: str | None = None
 
 
+def injected_alarm(det: Detection, sc: RealScenario):
+    """The first alarm on the injected sensor at or after the injection onset, if any.
+
+    The real run has dozens of natural alarms, so the detector's overall first alarm is
+    never the injected one. An injected scenario is scored on the injected sensor's own
+    alarm episode, with the earlier natural alarms treated as acknowledged. ``None`` means
+    the detector never fired on that sensor after the injection: a detection miss.
+    """
+    if sc.fault is None or sc.fault.stage is None or sc.fault.sensor is None:
+        return None
+    sid = f"{sc.fault.stage}.{sc.fault.sensor}"
+    cands = [a for a in det.alarms if a.sensor == sid and a.alarm_tick >= sc.fault.onset_tick]
+    return min(cands, key=lambda a: a.alarm_tick) if cands else None
+
+
 def diagnose_real(
     sc: RealScenario,
     cfg: AgentConfig,
@@ -69,6 +84,15 @@ def diagnose_real(
     console: Console | None = None,
 ) -> RealResult:
     det = detect(sc.data, detector)
+    if sc.fault is not None:
+        chosen = injected_alarm(det, sc)
+        det = det.model_copy(
+            update={
+                "triggered": chosen is not None,
+                "first_alarm": chosen,
+                "alarm_tick": chosen.alarm_tick if chosen else None,
+            }
+        )
     res = RealResult(
         scenario_id=sc.scenario_id,
         truth=sc.truth if sc.fault else None,
@@ -164,9 +188,15 @@ def summarise(results: list[RealResult]) -> dict[str, Any]:
         vals = [v for v in vals if v is not None]
         return round(100 * sum(vals) / len(vals), 1) if vals else None
 
+    injected = [r for r in results if r.truth is not None]
     return {
         "n": len(results),
         "n_labelled_alarms": len(labelled),
+        "injected_fault_detected_pct": round(
+            100 * sum(r.detector_triggered for r in injected) / len(injected), 1
+        )
+        if injected
+        else None,
         "naive_sensor_correct_pct": acc(
             lambda r: (
                 r.naive_score.stage_correct

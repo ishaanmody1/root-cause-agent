@@ -129,7 +129,7 @@ def render_dashboard(sc: Any, det: Detection, run: DiagnosisRun, path: Path) -> 
     events_rows = (
         "".join(
             f"<tr><td>{e.tick}</td><td>{html.escape(e.kind)}</td><td>{html.escape(e.stage or '-')}</td><td>{html.escape(e.description)}</td></tr>"
-            for e in sc.spec.events
+            for e in events
         )
         or "<tr><td colspan=4 class='muted'>No events logged.</td></tr>"
     )
