@@ -52,7 +52,7 @@ flowchart LR
 | Agent | A hand-rolled loop over the Anthropic Messages API with strict tools. Owns budgets (steps and dollars), token/cost accounting, a JSONL trace of every model and tool call, prompt caching, and the failure paths (refusal, truncation, model never submitting). | `src/rootcause/agent` |
 | Evals | Balanced scenario suite with deliberately misleading cases. Scores root-cause accuracy, fault-type accuracy, calibration (Brier, ECE), abstention rate, confident-error rate, false positives on no-fault alarms, tool calls, tokens, cost and latency. Two non-LLM baselines for comparison. | `src/rootcause/evals` |
 | Real data | Adapter for the public Liveline continuous-flow dataset (parallel machines feeding a combiner, then two machines in series). Labelled sensor faults are injected into the real series for a quantitative check. | `src/rootcause/realdata` |
-| UI | One self-contained HTML file per diagnosis: all sensor traces with baseline band, alarm window and true onset, next to the diagnosis, evidence chain and the full agent trace. No server, no CDN. | `src/rootcause/ui` |
+| UI | One self-contained HTML file per diagnosis, laid out like an industrial HMI (ISA-101 high-performance style, as in Ignition or AVEVA InTouch): alarm summary, one panel per stage with its sensor trends and live values, and the diagnosis, evidence table, alternatives and agent trace beside them. Colour is reserved for abnormal states. No server, no CDN. | `src/rootcause/ui` |
 
 ## Quickstart
 
@@ -261,7 +261,9 @@ The CSV is not redistributed (license unstated on Kaggle). Download it from the 
   cost per diagnosis so the model and effort can be chosen on evidence. Both are flags.
 - **Inline SVG dashboards, no Plotly.** A CDN script failed to load in a sandboxed viewer
   during development; a self-contained file that opens anywhere, including from `file://`,
-  is worth more than hover tooltips.
+  is worth more than hover tooltips. The layout follows high-performance HMI conventions
+  (grey panels, colour only for abnormal states, dense tables) because the reader is a
+  plant engineer who already lives in Ignition or InTouch screens, not a consumer app.
 - **Rule-based backend speaks the SDK's `Message` type.** The loop cannot tell it from the
   real API, so the whole pipeline, including budget exhaustion and error paths, is tested in
   CI without a key.
