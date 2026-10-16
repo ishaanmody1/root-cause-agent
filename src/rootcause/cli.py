@@ -255,3 +255,96 @@ def dashboard(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("real-diagnose")
+def real_diagnose(
+    csv: Annotated[Path, typer.Option("--csv", help="continuous_factory_process.csv")] = Path(
+        "data/real/continuous_factory_process.csv"
+    ),
+    alarm_index: Annotated[
+        int, typer.Option("--alarm", help="Which natural alarm episode to investigate (0 = first)")
+    ] = 0,
+    backend: Annotated[
+        str, typer.Option("--backend", "-b", help="anthropic | detect-only")
+    ] = "anthropic",
+    model: Annotated[
+        str, typer.Option("--model", "-m", envvar="ROOTCAUSE_MODEL")
+    ] = "claude-sonnet-5-5",
+    effort: Annotated[str, typer.Option("--effort")] = "medium",
+    grace: Annotated[int, typer.Option("--grace")] = 25,
+    max_cost: Annotated[float, typer.Option("--max-cost")] = 0.75,
+    out: Annotated[Path, typer.Option("--out", "-o")] = Path("runs"),
+) -> None:
+    """Diagnose a natural alarm in the real Liveline dataset (no ground truth; qualitative)."""
+    from rootcause.realdata.evaluate import (
+        REAL_DETECTOR,
+        diagnose_real,
+        natural_scenario,
+        new_run_dir,
+    )
+
+    sc = natural_scenario(csv)
+    det = detect(sc.data, REAL_DETECTOR)
+    console.print(
+        f"[bold]{sc.topology.name}[/]: {len(sc.data)} ticks, {len(sc.topology.sensor_ids())} sensors, {len(det.alarms)} alarms"
+    )
+    for i, a in enumerate(sorted(det.alarms, key=lambda a: a.alarm_tick)[:12]):
+        console.print(f"  [{i}] {a.describe()}")
+    run_dir = new_run_dir(out, "natural")
+    cfg = AgentConfig(model=model, effort=effort, grace_ticks=grace, max_cost_usd=max_cost)  # type: ignore[arg-type]
+    res = diagnose_real(sc, cfg, run_dir, backend=backend, alarm_index=alarm_index, console=console)
+    if res.agent:
+        console.print(
+            Panel(
+                res.agent_summary or "",
+                title=f"Agent: {res.agent.fault_type}@{res.agent.root_cause_stage or '-'} ({res.agent.status}, conf {res.agent.confidence:.2f})",
+                expand=False,
+            )
+        )
+        console.print(f"[dim]dashboard: {res.dashboard}[/]")
+    else:
+        console.print(f"Naive baseline would blame: {res.naive}")
+
+
+@app.command("real-eval")
+def real_eval(
+    n: Annotated[int, typer.Option("--n", "-n")] = 20,
+    seed: Annotated[int, typer.Option("--seed", "-s")] = 0,
+    csv: Annotated[Path, typer.Option("--csv")] = Path("data/real/continuous_factory_process.csv"),
+    backend: Annotated[
+        str, typer.Option("--backend", "-b", help="anthropic | detect-only")
+    ] = "anthropic",
+    model: Annotated[
+        str, typer.Option("--model", "-m", envvar="ROOTCAUSE_MODEL")
+    ] = "claude-sonnet-5-5",
+    effort: Annotated[str, typer.Option("--effort")] = "medium",
+    max_cost: Annotated[float, typer.Option("--max-cost")] = 0.75,
+    concurrency: Annotated[int, typer.Option("--concurrency", "-c")] = 4,
+    out: Annotated[Path, typer.Option("--out", "-o")] = Path("runs"),
+) -> None:
+    """Labelled sensor faults injected into the real dataset: can the agent localise them?"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcause.realdata.evaluate import (
+        diagnose_real,
+        injected_suite,
+        new_run_dir,
+        summarise,
+        write_results,
+    )
+
+    scenarios = injected_suite(n, seed, csv)
+    run_dir = new_run_dir(out, "injected")
+    cfg = AgentConfig(model=model, effort=effort, max_cost_usd=max_cost)  # type: ignore[arg-type]
+    workers = concurrency if backend == "anthropic" else 1
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(
+            ex.map(
+                lambda sc: diagnose_real(sc, cfg, run_dir, backend=backend, console=console),
+                scenarios,
+            )
+        )
+    p = write_results(results, run_dir)
+    console.print(summarise(results))
+    console.print(f"[green]Results:[/] {p}")

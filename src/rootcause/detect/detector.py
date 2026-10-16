@@ -37,6 +37,15 @@ class Baseline(BaseModel):
     mean: float
     std: float
     n: int
+    # Fraction of consecutive identical values in the baseline. Controlled or lab-value
+    # channels sit exactly constant for long stretches, so flatline / stuck-zero rules only
+    # apply to sensors that actually vary when healthy.
+    repeat_frac: float = 0.0
+    had_zeros: bool = False
+
+    @property
+    def quantised(self) -> bool:
+        return self.repeat_frac > 0.3
 
 
 class SensorAlarm(BaseModel):
@@ -80,7 +89,10 @@ def robust_baseline(x: np.ndarray) -> Baseline:
     mad = float(np.median(np.abs(v - med))) * 1.4826
     if mad == 0.0:
         mad = float(np.std(v))
-    return Baseline(mean=med, std=mad, n=int(len(v)))
+    repeat = float(np.mean(np.diff(v) == 0.0)) if len(v) > 1 else 1.0
+    return Baseline(
+        mean=med, std=mad, n=int(len(v)), repeat_frac=repeat, had_zeros=bool(np.any(v == 0.0))
+    )
 
 
 def _first_run(mask: np.ndarray, k: int) -> tuple[int, int] | None:
@@ -141,7 +153,7 @@ def detect(data: pd.DataFrame, config: DetectorConfig | None = None) -> Detectio
 
         # Stuck at zero.
         hit = _first_run(post == 0.0, cfg.persistence)
-        if hit and abs(b.mean) > 5 * max(b.std, 1e-9):
+        if hit and abs(b.mean) > 5 * max(b.std, 1e-9) and not b.had_zeros:
             s, e = hit
             alarms.append(
                 SensorAlarm(
@@ -158,7 +170,7 @@ def detect(data: pd.DataFrame, config: DetectorConfig | None = None) -> Detectio
         # Flatline: identical consecutive values over a window (noise makes this impossible
         # for a healthy sensor).
         same = np.concatenate([[False], np.diff(post) == 0.0])
-        hit = _first_run(same, cfg.flatline_window)
+        hit = _first_run(same, cfg.flatline_window) if not b.quantised else None
         if hit:
             s, e = hit
             alarms.append(

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 from rootcause.agent.pricing import estimate_cost_usd
 from rootcause.agent.prompts import SYSTEM_PROMPT, user_prompt
 from rootcause.agent.schema import Diagnosis
-from rootcause.agent.tools import TOOL_SPECS, ToolContext
+from rootcause.agent.tools import ToolContext
 
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
@@ -166,7 +166,9 @@ class DiagnosisAgent:
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
-                "content": user_prompt(ctx.detection_summary(), ctx.t_now, ctx.baseline_ticks),
+                "content": user_prompt(
+                    ctx.detection_summary(), ctx.t_now, ctx.baseline_ticks, ctx.topology.name
+                ),
             }
         ]
         diagnosis: Diagnosis | None = None
@@ -174,7 +176,8 @@ class DiagnosisAgent:
         error: str | None = None
         nudges = 0
         budget_nudged = False
-        tools = TOOL_SPECS
+        all_tools = ctx.tool_specs
+        tools = all_tools
 
         step = 0
         while True:
@@ -185,7 +188,7 @@ class DiagnosisAgent:
                 # One last call, submit-only.
                 budget_nudged = True
                 status = "budget_exhausted"
-                tools = [t for t in TOOL_SPECS if t["name"] == "submit_diagnosis"]
+                tools = [t for t in all_tools if t["name"] == "submit_diagnosis"]
                 messages.append({"role": "user", "content": NUDGE_BUDGET})
                 trace.append(
                     TraceStep(step=step, kind="nudge", wall_time=time.time(), text=NUDGE_BUDGET)

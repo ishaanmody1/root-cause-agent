@@ -19,7 +19,7 @@ from rootcause.agent.schema import Diagnosis, strict_schema
 from rootcause.detect.detector import Detection, DetectorConfig, ewma, robust_baseline
 from rootcause.sim.faults import Event
 from rootcause.sim.simulator import Scenario
-from rootcause.sim.topology import SENSORS, STAGES, LineParams, Topology, get_topology, sensor_id
+from rootcause.sim.topology import LineParams, Topology, get_topology, sensor_id
 
 
 class ToolError(Exception):
@@ -52,6 +52,7 @@ class ToolContext:
         self.topology = topology or get_topology(self.params)
         self.baseline_ticks = baseline_ticks or detection.config.baseline_ticks
         self.call_count = 0
+        self.tool_specs = build_tool_specs(self.topology)
 
     @classmethod
     def from_scenario(
@@ -68,24 +69,39 @@ class ToolContext:
             events=sc.spec.events,
             t_now=t_now,
             params=sc.params,
+            topology=get_topology(sc.params),
             baseline_ticks=sc.spec.baseline_ticks,
         )
 
     # ------------------------------------------------------------------ helpers
     def _series(self, stage: str, sensor: str) -> tuple[str, np.ndarray]:
-        if stage not in STAGES:
-            raise ToolError(f"unknown stage '{stage}'. Stages: {STAGES}")
-        if sensor not in SENSORS[stage]:
-            raise ToolError(f"stage '{stage}' has no sensor '{sensor}'. It has: {SENSORS[stage]}")
+        stages = self.topology.stages
+        if stage not in stages:
+            raise ToolError(f"unknown stage '{stage}'. Stages: {stages}")
+        sensors = self.topology.sensors[stage]
+        if sensor not in sensors:
+            raise ToolError(f"stage '{stage}' has no sensor '{sensor}'. It has: {sensors}")
         sid = sensor_id(stage, sensor)
+        if sid not in self.data.columns:
+            raise ToolError(f"no data column for {sid}")
         return sid, self.data[sid].to_numpy(dtype=float)
 
-    def _baseline(self, sid: str) -> tuple[float, float]:
+    def _baseline_obj(self, sid: str):
         b = self.detection.baselines.get(sid)
         if b is None or b.n == 0:
-            rb = robust_baseline(self.data[sid].to_numpy(dtype=float)[: self.baseline_ticks])
-            return rb.mean, max(rb.std, 1e-9)
+            b = robust_baseline(self.data[sid].to_numpy(dtype=float)[: self.baseline_ticks])
+        return b
+
+    def _baseline(self, sid: str) -> tuple[float, float]:
+        b = self._baseline_obj(sid)
         return b.mean, max(b.std, abs(b.mean) * 1e-3, 1e-9)
+
+    def _varies_when_healthy(self, sid: str) -> bool:
+        return not self._baseline_obj(sid).quantised
+
+    def _zero_is_abnormal(self, sid: str) -> bool:
+        b = self._baseline_obj(sid)
+        return (not b.had_zeros) and abs(b.mean) > 5 * max(b.std, 1e-9)
 
     def _clamp(self, t_start: int | None, t_end: int | None) -> tuple[int, int]:
         a = 0 if t_start is None else max(0, int(t_start))
@@ -185,10 +201,10 @@ class ToolContext:
         pct = (recent_mean - mu) / mu * 100 if abs(mu) > 1e-9 else None
         tt = np.arange(a, self.t_now + 1)[~np.isnan(seg)]
         slope = float(np.polyfit(tt, valid, 1)[0]) * 10 if len(valid) >= 5 else 0.0
-        flat = len(valid) >= 10 and float(np.std(valid)) == 0.0
+        flat = len(valid) >= 10 and float(np.std(valid)) == 0.0 and self._varies_when_healthy(sid)
         if flat:
             verdict = "flatline"
-        elif np.all(valid == 0.0) and abs(mu) > 5 * sd:
+        elif np.all(valid == 0.0) and self._zero_is_abnormal(sid):
             verdict = "stuck_zero"
         elif shift_sigma > 3:
             verdict = "elevated"
@@ -230,8 +246,8 @@ class ToolContext:
         cfg = DetectorConfig()
         devs: list[dict[str, Any]] = []
         quiet: list[str] = []
-        for stage in STAGES:
-            for sensor in SENSORS[stage]:
+        for stage in self.topology.stages:
+            for sensor in self.topology.sensors[stage]:
                 sid, x = self._series(stage, sensor)
                 seg = x[a : b + 1]
                 ticks = np.arange(a, b + 1)
@@ -244,9 +260,9 @@ class ToolContext:
                     zero_run = _first_run_len(seg == 0.0, k)
                     same = np.concatenate([[False], np.diff(seg) == 0.0])
                     flat_run = _first_run_len(same, cfg.flatline_window)
-                    if zero_run is not None and abs(mu) > 5 * sd:
+                    if zero_run is not None and self._zero_is_abnormal(sid):
                         entry = {"direction": "stuck_zero", "first_tick": int(ticks[zero_run])}
-                    elif flat_run is not None:
+                    elif flat_run is not None and self._varies_when_healthy(sid):
                         entry = {
                             "direction": "flatline",
                             "first_tick": int(ticks[max(flat_run - 1, 0)]),
@@ -272,17 +288,23 @@ class ToolContext:
                 else:
                     devs.append({"sensor": sid, "stage": stage, "measure": sensor, **entry})
         devs.sort(key=lambda d: d["first_tick"])
-        return {
+        max_list = 30
+        out: dict[str, Any] = {
             "t_now": self.t_now,
             "window_searched": [a, b],
             "z_threshold": thr,
             "persistence": k,
-            "deviations_in_order_of_onset": devs,
-            "sensors_still_normal": quiet,
+            "deviations_in_order_of_onset": devs[:max_list],
+            "n_deviating": len(devs),
+            "sensors_still_normal": quiet if len(quiet) <= max_list else quiet[:max_list],
+            "n_still_normal": len(quiet),
             "note": "first_tick is when the smoothed z-score first stayed beyond the threshold. "
-            "Noisy sensors (feed.pressure, heater.power, press.pressure) deviate later than "
-            "quiet ones for the same physical change, so use the physics to order causes.",
+            "Noisy sensors deviate later than quiet ones for the same physical change, so use "
+            "the physics and the topology to order causes.",
         }
+        if len(devs) > max_list:
+            out["note"] += f" Only the first {max_list} of {len(devs)} deviations are listed."
+        return out
 
     def list_recent_events(
         self, t_start: int | None = None, t_end: int | None = None
@@ -308,10 +330,12 @@ class ToolContext:
         flags: list[str] = []
         if np.isnan(recent).mean() > 0.2:
             flags.append("missing_data")
-        if len(valid) >= 10 and float(np.std(valid)) == 0.0:
+        if len(valid) >= 10 and float(np.std(valid)) == 0.0 and self._varies_when_healthy(sid):
             flags.append("flatline")
-        if len(valid) and np.all(valid == 0.0) and abs(mu) > 5 * sd:
+        if len(valid) and np.all(valid == 0.0) and self._zero_is_abnormal(sid):
             flags.append("stuck_zero")
+        if not self._varies_when_healthy(sid):
+            flags.append("quantised_or_controlled_channel")
         if len(valid) and (valid.min() < 0 and mu > 0):
             flags.append("negative_reading")
         if len(valid) and abs(float(valid.mean()) - mu) > 10 * sd:
@@ -343,19 +367,25 @@ class ToolContext:
         }
 
     def _coupled_sensors(self, stage: str, sensor: str) -> list[tuple[str, str]]:
-        i = STAGES.index(stage)
-        out: list[tuple[str, str]] = []
-        for other in SENSORS[stage]:
-            if other != sensor:
-                out.append((stage, other))
-        if i + 1 < len(STAGES):
-            nxt = STAGES[i + 1]
-            out.append((nxt, "flow"))
-            if "temperature" in SENSORS[nxt]:
-                out.append((nxt, "temperature"))
-        if i > 0:
-            out.append((STAGES[i - 1], "flow"))
-        return out
+        """Same-stage sensors plus the immediately upstream and downstream stages' sensors.
+
+        Capped so the tool result stays small on lines with many sensors: when a neighbour
+        stage has more than a few sensors, keep the ones that moved most.
+        """
+        topo = self.topology
+        out: list[tuple[str, str]] = [(stage, m) for m in topo.sensors[stage] if m != sensor]
+        neighbours = topo.upstream.get(stage, []) + topo.downstream(stage)
+        for nb in neighbours:
+            cands = [(nb, m) for m in topo.sensors[nb]]
+            if len(cands) > 4:
+                scored = []
+                for st, m in cands:
+                    c = self.compare_to_baseline(st, m, 30)
+                    scored.append((abs(c.get("shift_sigma") or 0.0), (st, m)))
+                scored.sort(reverse=True)
+                cands = [sm for _, sm in scored[:4]]
+            out.extend(cands)
+        return out[:12]
 
     # ---------------------------------------------------------------- dispatch
     def call_tool(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -394,126 +424,124 @@ def _nullable(t: str, **extra: Any) -> dict[str, Any]:
     return {"type": [t, "null"], **extra}
 
 
-TOOL_SPECS: list[dict[str, Any]] = [
-    {
-        "name": "get_line_topology",
-        "description": "Stage order, sensors per stage, transport lags, and the causal rules "
-        "linking signals. Call once at the start.",
-        "input_schema": {
-            "type": "object",
-            "properties": {},
-            "additionalProperties": False,
-            "required": [],
-        },
-    },
-    {
-        "name": "find_first_deviation",
-        "description": "For every sensor, the first tick after the baseline window at which its "
-        "smoothed z-score stayed beyond z_threshold for `persistence` ticks, plus missing / "
-        "flatline / stuck-zero detection. Returns deviations ordered by onset and the sensors "
-        "that are still normal. Defaults (2.5, 3) are more sensitive than the alarm detector.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "z_threshold": _nullable("number", description="Default 2.5. Minimum 1.0."),
-                "persistence": _nullable("integer", description="Consecutive ticks. Default 3."),
-                "t_start": _nullable(
-                    "integer", description="Search start tick (default: baseline end)."
-                ),
-                "t_end": _nullable("integer", description="Search end tick (default: now)."),
+def build_tool_specs(topology: Topology) -> list[dict[str, Any]]:
+    """Strict tool definitions with stage/sensor enums taken from the topology."""
+    stages = list(topology.stages)
+    sensor_names = topology.all_sensor_names()
+    specs: list[dict[str, Any]] = [
+        {
+            "name": "get_line_topology",
+            "description": "Stage order (with parallel branches and merges), sensors per stage, "
+            "typical lags, and the causal rules linking signals. Call once at the start.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+                "required": [],
             },
-            "additionalProperties": False,
-            "required": ["z_threshold", "persistence", "t_start", "t_end"],
         },
-    },
-    {
-        "name": "compare_to_baseline",
-        "description": "Recent window of one sensor vs its baseline: shift in sigma units, percent "
-        "change, trend slope, NaN fraction, and a verdict (normal / slightly_elevated / "
-        "elevated / depressed / missing / flatline / stuck_zero).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "stage": {"type": "string", "enum": STAGES},
-                "sensor": {
-                    "type": "string",
-                    "enum": ["flow", "pressure", "temperature", "power", "quality"],
+        {
+            "name": "find_first_deviation",
+            "description": "For every sensor, the first tick after the baseline window at which "
+            "its smoothed z-score stayed beyond z_threshold for `persistence` ticks, plus "
+            "missing / flatline / stuck-zero detection. Returns deviations ordered by onset "
+            "and the sensors that are still normal. Defaults (2.5, 3) are more sensitive than "
+            "the alarm detector.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "z_threshold": _nullable("number", description="Default 2.5. Minimum 1.0."),
+                    "persistence": _nullable(
+                        "integer", description="Consecutive ticks. Default 3."
+                    ),
+                    "t_start": _nullable(
+                        "integer", description="Search start tick (default: baseline end)."
+                    ),
+                    "t_end": _nullable("integer", description="Search end tick (default: now)."),
                 },
-                "window_ticks": _nullable(
-                    "integer", description="Recent window length. Default 30."
-                ),
+                "additionalProperties": False,
+                "required": ["z_threshold", "persistence", "t_start", "t_end"],
             },
-            "additionalProperties": False,
-            "required": ["stage", "sensor", "window_ticks"],
         },
-    },
-    {
-        "name": "query_sensor",
-        "description": "Time series for one sensor over a tick range (downsampled to max_points "
-        "bucket means), with summary stats and the baseline mean/std for reference. Use it to "
-        "see the shape and timing of a deviation.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "stage": {"type": "string", "enum": STAGES},
-                "sensor": {
-                    "type": "string",
-                    "enum": ["flow", "pressure", "temperature", "power", "quality"],
+        {
+            "name": "compare_to_baseline",
+            "description": "Recent window of one sensor vs its baseline: shift in sigma units, "
+            "percent change, trend slope, NaN fraction, and a verdict (normal / "
+            "slightly_elevated / elevated / depressed / missing / flatline / stuck_zero).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "stage": {"type": "string", "enum": stages},
+                    "sensor": {"type": "string", "enum": sensor_names},
+                    "window_ticks": _nullable(
+                        "integer", description="Recent window length. Default 30."
+                    ),
                 },
-                "t_start": _nullable("integer"),
-                "t_end": _nullable("integer"),
-                "max_points": _nullable("integer", description="4-200, default 40."),
+                "additionalProperties": False,
+                "required": ["stage", "sensor", "window_ticks"],
             },
-            "additionalProperties": False,
-            "required": ["stage", "sensor", "t_start", "t_end", "max_points"],
         },
-    },
-    {
-        "name": "list_recent_events",
-        "description": "Operator / maintenance event log (setpoint changes, maintenance, shift "
-        "changes) within a tick range. Setpoint changes have real physical effects; the rest "
-        "are informational.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "t_start": _nullable("integer"),
-                "t_end": _nullable("integer"),
-            },
-            "additionalProperties": False,
-            "required": ["t_start", "t_end"],
-        },
-    },
-    {
-        "name": "check_sensor_health",
-        "description": "Data-quality flags for one sensor (missing, flatline, stuck zero, far "
-        "outside baseline) and the verdicts of its physically coupled signals, to separate "
-        "sensor faults from process faults.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "stage": {"type": "string", "enum": STAGES},
-                "sensor": {
-                    "type": "string",
-                    "enum": ["flow", "pressure", "temperature", "power", "quality"],
+        {
+            "name": "query_sensor",
+            "description": "Time series for one sensor over a tick range (downsampled to "
+            "max_points bucket means), with summary stats and the baseline mean/std for "
+            "reference. Use it to see the shape and timing of a deviation.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "stage": {"type": "string", "enum": stages},
+                    "sensor": {"type": "string", "enum": sensor_names},
+                    "t_start": _nullable("integer"),
+                    "t_end": _nullable("integer"),
+                    "max_points": _nullable("integer", description="4-200, default 40."),
                 },
+                "additionalProperties": False,
+                "required": ["stage", "sensor", "t_start", "t_end", "max_points"],
             },
-            "additionalProperties": False,
-            "required": ["stage", "sensor"],
         },
-    },
-    {
-        "name": "submit_diagnosis",
-        "description": "Submit the final structured diagnosis. Call exactly once, when the "
-        "evidence is gathered. This ends the investigation.",
-        "input_schema": strict_schema(Diagnosis),
-    },
-]
+        {
+            "name": "list_recent_events",
+            "description": "Operator / maintenance event log (setpoint changes, maintenance, "
+            "shift changes) within a tick range. Setpoint changes have real physical effects; "
+            "the rest are informational. May be empty.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"t_start": _nullable("integer"), "t_end": _nullable("integer")},
+                "additionalProperties": False,
+                "required": ["t_start", "t_end"],
+            },
+        },
+        {
+            "name": "check_sensor_health",
+            "description": "Data-quality flags for one sensor (missing, flatline, stuck zero, far "
+            "outside baseline) and the verdicts of its physically coupled signals (same stage "
+            "and neighbouring stages), to separate sensor faults from process faults.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "stage": {"type": "string", "enum": stages},
+                    "sensor": {"type": "string", "enum": sensor_names},
+                },
+                "additionalProperties": False,
+                "required": ["stage", "sensor"],
+            },
+        },
+        {
+            "name": "submit_diagnosis",
+            "description": "Submit the final structured diagnosis. Call exactly once, when the "
+            "evidence is gathered. This ends the investigation.",
+            "input_schema": strict_schema(Diagnosis),
+        },
+    ]
+    for spec in specs:
+        spec["strict"] = True
+    return specs
 
-for _spec in TOOL_SPECS:
-    _spec["strict"] = True
 
+# Default specs for the simulated line (kept for convenience and tests).
+TOOL_SPECS: list[dict[str, Any]] = build_tool_specs(get_topology())
 TOOL_NAMES = [t["name"] for t in TOOL_SPECS]
 
 
-def tool_specs_json() -> str:
-    return json.dumps(TOOL_SPECS, indent=2)
+def tool_specs_json(topology: Topology | None = None) -> str:
+    return json.dumps(build_tool_specs(topology) if topology else TOOL_SPECS, indent=2)

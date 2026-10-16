@@ -8,11 +8,12 @@ from __future__ import annotations
 import html
 import json
 from pathlib import Path
+from typing import Any
 
 from rootcause.agent.loop import DiagnosisRun
 from rootcause.detect.detector import Detection
 from rootcause.sim.simulator import Scenario
-from rootcause.sim.topology import SENSORS, STAGES, sensor_id
+from rootcause.sim.topology import Topology, get_topology, sensor_id
 
 CSS = """
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1a1d21;--muted:#5f6b7a;--line:#e3e6ea;--accent:#2563eb;
@@ -49,34 +50,42 @@ def _badge(status: str) -> str:
     return f'<span class="badge {cls}">{html.escape(status)}</span>'
 
 
-def render_dashboard(sc: Scenario, det: Detection, run: DiagnosisRun, path: Path) -> Path:
+def _view(sc: Any) -> tuple[Topology, list, int]:
+    """Duck-type simulated and real scenarios: (topology, events, baseline_ticks)."""
+    if isinstance(sc, Scenario):
+        return get_topology(sc.params), list(sc.spec.events), sc.spec.baseline_ticks
+    return sc.topology, list(getattr(sc, "events", []) or []), sc.baseline_ticks
+
+
+def render_dashboard(sc: Any, det: Detection, run: DiagnosisRun, path: Path) -> Path:
     d = run.diagnosis
     assert d is not None
     t_now = run.t_now
     first = det.first_alarm
     alarm_tick = first.alarm_tick if first else None
     truth = sc.truth
+    topo, events, baseline_ticks = _view(sc)
 
     series = {}
-    for s in STAGES:
-        for m in SENSORS[s]:
+    for s in topo.stages:
+        for m in topo.sensors[s]:
             sid = sensor_id(s, m)
             vals = sc.data[sid].tolist()
             series[sid] = [None if (v != v) else round(v, 3) for v in vals]
     payload = {
         "t": sc.data["t"].tolist(),
         "series": series,
-        "stages": STAGES,
-        "sensors": SENSORS,
+        "stages": topo.stages,
+        "sensors": topo.sensors,
         "baselines": {k: {"mean": v.mean, "std": v.std} for k, v in det.baselines.items()},
         "alarms": [a.model_dump() for a in det.alarms],
         "alarm_tick": alarm_tick,
         "t_now": t_now,
         "onset": truth.onset_tick,
-        "baseline_ticks": sc.spec.baseline_ticks,
+        "baseline_ticks": baseline_ticks,
         "root_stage": d.root_cause_stage,
         "truth_stage": truth.root_cause_stage,
-        "events": [e.model_dump() for e in sc.spec.events],
+        "events": [e.model_dump() for e in events],
     }
 
     ev_html = (
@@ -209,7 +218,7 @@ function chart(sid, stage) {{
 }}
 for (const stage of D.stages) {{
   const row = document.createElement('div');
-  row.style.display = 'grid'; row.style.gridTemplateColumns = innerWidth < 700 ? '1fr' : 'repeat(3,minmax(0,1fr))'; row.style.gap = '8px'; row.style.marginBottom = '8px';
+  row.style.display = 'grid'; row.style.gridTemplateColumns = innerWidth < 700 ? '1fr' : (D.sensors[stage].length <= 3 ? 'repeat(3,minmax(0,1fr))' : 'repeat(auto-fill,minmax(220px,1fr))'); row.style.gap = '8px'; row.style.marginBottom = '8px';
   for (const m of D.sensors[stage]) {{
     const div = document.createElement('div'); div.innerHTML = chart(stage + '.' + m, stage); row.appendChild(div);
   }}

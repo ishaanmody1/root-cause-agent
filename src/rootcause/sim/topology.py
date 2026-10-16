@@ -152,12 +152,40 @@ CAUSAL_LINKS: list[dict[str, str]] = [
 
 
 class Topology(BaseModel):
+    """Line description shared by the simulator, the tools and the agent.
+
+    ``upstream`` maps each stage to the stages that feed it directly, so parallel
+    branches and merges can be expressed, not just a chain.
+    """
+
+    name: str = "simulated 4-stage line"
     stages: list[str]
     sensors: dict[str, list[str]]
     units: dict[str, str]
     lags_ticks: dict[str, int]
     causal_links: list[dict[str, str]]
     notes: list[str]
+    upstream: dict[str, list[str]] = Field(default_factory=dict)
+    tick_seconds: float = 60.0
+    fault_vocabulary: str = (
+        "clog = flow restriction inside a stage; overheating = runaway heat input; supply_drop = "
+        "reduced raw-material input to the first stage; sensor_drift / sensor_failure = one "
+        "instrument misreporting with no physical effect."
+    )
+
+    def downstream(self, stage: str) -> list[str]:
+        return [s for s, ups in self.upstream.items() if stage in ups]
+
+    def sensor_ids(self) -> list[str]:
+        return [f"{s}.{m}" for s in self.stages for m in self.sensors[s]]
+
+    def all_sensor_names(self) -> list[str]:
+        seen: list[str] = []
+        for s in self.stages:
+            for m in self.sensors[s]:
+                if m not in seen:
+                    seen.append(m)
+        return seen
 
 
 def get_topology(params: LineParams | None = None) -> Topology:
@@ -168,6 +196,8 @@ def get_topology(params: LineParams | None = None) -> Topology:
         units=SENSOR_UNITS,
         lags_ticks=params.lag,
         causal_links=CAUSAL_LINKS,
+        upstream={"feed": [], "heater": ["feed"], "press": ["heater"], "finish": ["press"]},
+        tick_seconds=60.0,
         notes=[
             "Stages are strictly sequential: feed -> heater -> press -> finish.",
             "Faults propagate downstream only. Nothing downstream can change an upstream sensor.",
