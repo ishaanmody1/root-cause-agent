@@ -6,9 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-FaultType = Literal[
-    "clog", "overheating", "sensor_drift", "sensor_failure", "supply_drop", "none"
-]
+FaultType = Literal["clog", "overheating", "sensor_drift", "sensor_failure", "supply_drop", "none"]
 
 FAULT_TYPES: list[str] = ["clog", "overheating", "sensor_drift", "sensor_failure", "supply_drop"]
 

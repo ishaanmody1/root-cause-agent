@@ -177,7 +177,7 @@ def detect(data: pd.DataFrame, config: DetectorConfig | None = None) -> Detectio
         z = ewma((post - b.mean) / sigma, cfg.ewma_alpha)
         hi = _first_run(z > cfg.z_threshold, cfg.persistence)
         lo = _first_run(z < -cfg.z_threshold, cfg.persistence)
-        cands = [(h, "high") for h in [hi] if h] + [(l, "low") for l in [lo] if l]
+        cands = [(h, "high") for h in [hi] if h] + [(x, "low") for x in [lo] if x]
         if cands:
             (s, e), kind = min(cands, key=lambda c: c[0][1])
             alarms.append(

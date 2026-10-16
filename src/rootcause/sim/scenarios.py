@@ -23,6 +23,7 @@ SCENARIO_KINDS: list[str] = [
     "supply_drop",
     "normal",
     "normal_setpoint_change",
+    "clog",  # clogs twice per cycle: they are the misleading cases the project is about
 ]
 
 _MAINTENANCE_TEXT = [
@@ -63,7 +64,9 @@ def _benign_events(rng: np.random.Generator, n_ticks: int, onset: int | None) ->
     return sorted(events, key=lambda e: e.tick)
 
 
-def make_scenario(kind: str, seed: int, n_ticks: int = 600, baseline_ticks: int = 200) -> ScenarioSpec:
+def make_scenario(
+    kind: str, seed: int, n_ticks: int = 600, baseline_ticks: int = 200
+) -> ScenarioSpec:
     rng = np.random.default_rng(seed)
     sid = f"{kind}-{seed:04d}"
     fault: Fault | None = None
@@ -90,6 +93,24 @@ def make_scenario(kind: str, seed: int, n_ticks: int = 600, baseline_ticks: int 
                 severity=float(rng.uniform(0.12, 0.35)),
                 ramp_ticks=int(rng.integers(20, 80)),
             )
+            if rng.random() < 0.4:
+                # Distractor: a tiny, logged setpoint change at the SAME stage shortly before
+                # the fault. It cannot explain the size of the deviation, but a lazy rule
+                # ("an event at that stage explains it") will blame it.
+                mult = float(rng.choice([1.01, 1.02, 0.98]))
+                events.append(
+                    Event(
+                        tick=max(baseline_ticks + 5, fault.onset_tick - int(rng.integers(5, 30))),
+                        kind="setpoint_change",
+                        stage=stage,
+                        heat_multiplier=mult,
+                        description=(
+                            f"Operator trimmed {stage} heat setpoint to {mult:.0%} of nominal "
+                            f"(minor recipe trim)."
+                        ),
+                    )
+                )
+                tags.append("distractor_event")
         case "supply_drop":
             fault = Fault(
                 fault_type="supply_drop",
